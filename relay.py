@@ -43,7 +43,7 @@ class Job:
       build_params = {
         var: os.environ[var]
         for var in os.environ
-        if var.startswith("GITHUB_")
+        if var.startswith("GITHUB_") and var != "GITHUB_TOKEN"
     })
 
     q.block_until_building()
