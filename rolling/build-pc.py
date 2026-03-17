@@ -1,1 +1,1 @@
-../build-whatever.py
+../run-whatever.py
