@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import sys
 import os
+import time
 try:
   from jenkinsapi.jenkins import Jenkins
 except ModuleNotFoundError:
@@ -12,6 +13,7 @@ except ModuleNotFoundError:
 
 from jenkinsapi.jenkins import Jenkins
 from jenkinsapi.custom_exceptions import UnknownJob
+from requests.exceptions import ConnectionError
 
 JENKINS_URL = os.environ.get("JENKINS_URL")
 CI_TOKEN = os.environ.get("CI_TOKEN")
@@ -60,5 +62,19 @@ class Job:
     def join(self):
       if not self.q:
         return
-      self.q.block_until_complete()
-      return self.build.get_status()
+
+      print("Waiting for Jenkins build completion")
+
+      build = self.q.block_until_complete()
+      print(f"Build completed: {build.name}")
+
+      for attempt in range(5):
+        try:
+          print(f"Reading Jenkins status (attempt {attempt + 1}/5)")
+          return build.get_status()
+        except ConnectionError as e:
+          print(f"Failed to get Jenkins status: {e}")
+          if attempt == 4:
+            raise
+
+          time.sleep(10)
