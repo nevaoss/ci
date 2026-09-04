@@ -14,17 +14,22 @@ except ModuleNotFoundError:
 
 from jenkinsapi.jenkins import Jenkins
 from jenkinsapi.custom_exceptions import UnknownJob
-from requests.exceptions import ConnectionError
+from requests.exceptions import RequestException
 
 JENKINS_URL = os.environ.get("JENKINS_URL")
 CI_TOKEN = os.environ.get("CI_TOKEN")
 
+# Only the actual result should be passed to stdout for further analysis.
+# All logs should be written to the stderr
+def log_print(message):
+  print(message, file=sys.stderr, flush=True)
+
 def fatal(e):
-  print(f"FATAL: {e}")
+  log_print(f"FATAL: {e}")
   sys.exit(-1)
 
 if not JENKINS_URL or not CI_TOKEN:
-  fatal("Neither JENKNIS_URL nor CI_TOKEN env variable is not specified")
+  fatal("Neither JENKINS_URL nor CI_TOKEN env variable is specified")
 
 class Job:
   def __init__(self, jobname):
@@ -55,27 +60,58 @@ class Job:
   class Queue:
     def __init__(self, q):
       self.q = q
+      self._build = None
 
     @property
     def build(self):
-      return self.q.get_build()
+      if not self._build:
+        self._build = self.q.get_build()
+
+      return self._build
 
     def join(self):
       if not self.q:
         return
 
-      print("Waiting for Jenkins build completion")
+      log_print("Waiting for Jenkins build completion")
 
-      build = self.q.block_until_complete()
-      print(f"Build completed: {build.name}")
+      build = self.q.get_build()
+      build.block_until_complete()
+
+      log_print(f"Build completed: {build.name}")
 
       for attempt in range(5):
         try:
-          print(f"Reading Jenkins status (attempt {attempt + 1}/5)")
+          log_print(f"Reading Jenkins status (attempt {attempt + 1}/5)")
+          build.poll()
           return build.get_status()
-        except ConnectionError as e:
-          print(f"Failed to get Jenkins status: {e}")
+        except RequestException as e:
+          log_print(f"Failed to get Jenkins status: {e}")
+
           if attempt == 4:
             raise
 
           time.sleep(10)
+
+    def get_artifact(self, name):
+      artifacts = self.build.get_artifacts()
+
+      for artifact in artifacts:
+        if artifact.filename != name:
+          continue
+
+        for attempt in range(5):
+          try:
+            log_print(f"Reading Jenkins artifact {name} (attempt {attempt + 1}/5)")
+            return artifact.get_data()
+          except ConnectionError as e:
+            log_print(f"Failed to get Jenkins artifact {name}: {e}")
+
+            if attempt == 4:
+              raise
+
+            time.sleep(10)
+
+      raise FileNotFoundError(
+        f"Artifact {name} is not found"
+      )
