@@ -66,12 +66,14 @@ class Job:
 
       print("Waiting for Jenkins build completion")
 
-      build = self.q.block_until_complete()
+      build = self.q.get_build()
+      build.block_until_complete()
       print(f"Build completed: {build.name}")
 
       for attempt in range(5):
         try:
           print(f"Reading Jenkins status (attempt {attempt + 1}/5)")
+          build.poll()
           return build.get_status()
         except ConnectionError as e:
           print(f"Failed to get Jenkins status: {e}")
