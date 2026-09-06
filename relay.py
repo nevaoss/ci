@@ -79,6 +79,22 @@ class Job:
         log_print(f"Failed to stop Jenkins build: {e}")
         raise
 
+    def retry(self, description, callback):
+      for attempt in range(5):
+        try:
+          log_print(
+            f"{description} "
+            f"(attempt {attempt + 1}/5)"
+          )
+          return callback()
+        except RequestException as e:
+          log_print(f"{description} failed: {e}")
+
+          if attempt == 4:
+            raise
+
+          time.sleep(10)
+
     def join(self):
       log_print("Waiting for Jenkins build completion")
 
@@ -87,18 +103,14 @@ class Job:
 
       log_print(f"Build completed: {build.name}")
 
-      for attempt in range(5):
-        try:
-          log_print(f"Reading Jenkins status (attempt {attempt + 1}/5)")
-          build.poll()
-          return build.get_status()
-        except RequestException as e:
-          log_print(f"Failed to get Jenkins status: {e}")
+      def get_status():
+        build.poll()
+        return build.get_status()
 
-          if attempt == 4:
-            raise
-
-          time.sleep(10)
+      return self.retry(
+        "Reading Jenkins status",
+        get_status
+      )
 
     def get_artifact(self, name):
       artifacts = self.build.get_artifacts()
@@ -107,20 +119,10 @@ class Job:
         if artifact.filename != name:
           continue
 
-        for attempt in range(5):
-          try:
-            log_print(
-              f"Reading Jenkins artifact {name} "
-              f"(attempt {attempt + 1}/5)"
-            )
-            return artifact.get_data()
-          except RequestException as e:
-            log_print(f"Failed to get Jenkins artifact {name}: {e}")
-
-            if attempt == 4:
-              raise
-
-            time.sleep(10)
+        return self.retry(
+          f"Reading Jenkins artifact {name}",
+          artifact.get_data
+        )
 
       raise FileNotFoundError(
         f"Artifact {name} is not found"

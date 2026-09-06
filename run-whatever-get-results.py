@@ -75,6 +75,7 @@ except Exception as e:
   error("Artifact results.json request failed")
 
 try:
+  results = results.decode("utf-8")
   json.loads(results)
 except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as e:
   error("Artifact results.json is invalid")
