@@ -66,6 +66,7 @@ class Job:
     def build(self):
       if not self._build:
         self._build = self.q.get_build()
+        export_build_number(self._build)
 
       return self._build
 
@@ -127,3 +128,16 @@ class Job:
       raise FileNotFoundError(
         f"Artifact {name} is not found"
       )
+
+# Expose the Jenkins build number as a step output (`jenkins_build`) so that
+# workflows can show it in commit statuses.
+def export_build_number(build):
+  output = os.environ.get("GITHUB_OUTPUT")
+  if not output:
+    return
+
+  try:
+    with open(output, "a") as f:
+      f.write(f"jenkins_build={build.get_number()}\n")
+  except Exception as e:
+    log_print(f"Failed to export Jenkins build number: {e}")
