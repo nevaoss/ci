@@ -1,0 +1,109 @@
+# Posts a commit status for a Jenkins job triggered from GitHub Actions, so
+# that the result is visible on the PR regardless of how the workflow was run.
+#
+# Usage (the workflow needs `permissions: statuses: write`):
+#
+#   - uses: nevaoss/ci/.github/actions/commit-status@main
+#     with:
+#       context: jenkins/build-pc
+#       label: Jenkins PC build
+#       state: pending
+#
+#   - name: Run PC builder
+#     id: jenkins
+#     run: ./build-pc.py
+#
+#   - if: always()
+#     uses: nevaoss/ci/.github/actions/commit-status@main
+#     with:
+#       context: jenkins/build-pc
+#       label: Jenkins PC build
+#       state: ${{ job.status }}
+#       build: ${{ steps.jenkins.outputs.jenkins_build }}
+#
+# Descriptions: "<label> is running", "<label> #<build> passed",
+# "<label> #<build> failed", "<label> #<build> was cancelled".
+#
+# Posting the status never fails the job. A failed request is retried, and if
+# it still fails a warning is shown on the run; the PR keeps its previous
+# status (e.g. pending) until the workflow is re-run.
+
+name: Commit status
+description: Post a Jenkins result as a commit status linked to the Actions run
+
+inputs:
+  context:
+    description: Status name shown on the PR, e.g. jenkins/build-pc
+    required: true
+  label:
+    description: Start of the status description, e.g. Jenkins PC build
+    required: true
+  state:
+    description: pending, or the job status (success, failure, cancelled)
+    required: true
+  build:
+    description: Jenkins build number, shown as "#<build>" when set
+    required: false
+    default: ''
+  sha:
+    description: Commit to attach the status to
+    required: false
+    default: ${{ github.sha }}
+  success-text:
+    description: Description suffix on success
+    required: false
+    default: passed
+  failure-text:
+    description: Description suffix on failure
+    required: false
+    default: failed
+  token:
+    description: Token with statuses:write permission
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Post commit status
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        CONTEXT: ${{ inputs.context }}
+        LABEL: ${{ inputs.label }}
+        JOB_STATE: ${{ inputs.state }}
+        BUILD: ${{ inputs.build }}
+        SHA: ${{ inputs.sha }}
+        SUCCESS_TEXT: ${{ inputs.success-text }}
+        FAILURE_TEXT: ${{ inputs.failure-text }}
+      run: |
+        NAME="${LABEL}${BUILD:+ #${BUILD}}"
+        case "${JOB_STATE}" in
+          pending)   STATE=pending; DESC="${LABEL} is running" ;;
+          success)   STATE=success; DESC="${NAME} ${SUCCESS_TEXT}" ;;
+          cancelled) STATE=error;   DESC="${NAME} was cancelled" ;;
+          *)         STATE=failure; DESC="${NAME} ${FAILURE_TEXT}" ;;
+        esac
+        TARGET_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+        if [[ -z "${SHA}" ]]; then
+          echo "::warning title=Commit status not posted::No commit to attach ${CONTEXT} to."
+          exit 0
+        fi
+
+        for attempt in 1 2 3; do
+          if gh api "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+              -f state="${STATE}" \
+              -f context="${CONTEXT}" \
+              -f description="${DESC}" \
+              -f target_url="${TARGET_URL}" > /dev/null; then
+            echo "Posted ${CONTEXT}: ${STATE} (${DESC})"
+            exit 0
+          fi
+          if (( attempt < 3 )); then
+            sleep 10
+          fi
+        done
+
+        echo "::warning title=Commit status not posted::Could not post ${CONTEXT} (${STATE}) to ${SHA}. Re-run the workflow to show the result on the PR."
+        exit 0
