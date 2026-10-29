@@ -14,12 +14,17 @@ try:
   q = Job(f"NEVA/{jobname}").trigger()
   print(f"Started {q.build.name}.")
 except Exception as e:
-  print(f"Job {jobname} trigger failed.")
+  print(f"Job {jobname} trigger failed: {e}")
   sys.exit(-1)
 
-status = q.join()
+try:
+  status = q.join()
+except Exception as e:
+  print(f"Job {jobname} status request failed: {e}")
+  sys.exit(-1)
+
 if status != "SUCCESS":
-  print(f"Job join failed with status: {status}")
+  print(f"Job completed with status {status}")
   sys.exit(-1)
 
 print(f"Completed with {status}.")
