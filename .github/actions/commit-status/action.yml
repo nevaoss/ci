@@ -24,9 +24,10 @@
 # Descriptions: "<label> is running", "<label> #<build> passed",
 # "<label> #<build> failed", "<label> #<build> was cancelled".
 #
-# Posting the status never fails the job. A failed request is retried, and if
-# it still fails a warning is shown on the run; the PR keeps its previous
-# status (e.g. pending) until the workflow is re-run.
+# Posting the status never fails the job. Server and network errors are
+# retried; client errors (4xx, e.g. 403 without `statuses: write`) are not.
+# If posting fails, a warning with the error is shown on the run and the PR
+# keeps its previous status (e.g. pending).
 
 name: Commit status
 description: Post a Jenkins result as a commit status linked to the Actions run
@@ -91,19 +92,27 @@ runs:
           exit 0
         fi
 
+        HINT="Re-run the workflow to show the result on the PR."
         for attempt in 1 2 3; do
-          if gh api "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+          if ERROR=$(gh api "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
               -f state="${STATE}" \
               -f context="${CONTEXT}" \
               -f description="${DESC}" \
-              -f target_url="${TARGET_URL}" > /dev/null; then
+              -f target_url="${TARGET_URL}" 2>&1 > /dev/null); then
             echo "Posted ${CONTEXT}: ${STATE} (${DESC})"
             exit 0
+          fi
+          # A client error fails the same way on every attempt, so only
+          # 5xx, 429 and network errors (no HTTP status) are retried.
+          if [[ "${ERROR}" =~ \(HTTP\ (4[0-9][0-9])\) && "${BASH_REMATCH[1]}" != 429 ]]; then
+            HINT="Check the workflow permissions (statuses: write) and inputs."
+            break
           fi
           if (( attempt < 3 )); then
             sleep 10
           fi
         done
 
-        echo "::warning title=Commit status not posted::Could not post ${CONTEXT} (${STATE}) to ${SHA}. Re-run the workflow to show the result on the PR."
+        ERROR="${ERROR//$'\n'/ }"
+        echo "::warning title=Commit status not posted::Could not post ${CONTEXT} (${STATE}) to ${SHA}: ${ERROR} ${HINT}"
         exit 0
