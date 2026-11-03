@@ -11,10 +11,12 @@ GitHub cannot search commits by tree, so the candidates are:
   1. the last head of each PR merged into this PR's head branch,
   2. previous heads of this PR (force pushes).
 
-Only statuses posted by github-actions[bot] count. For each context, the
-newest of these statuses among all candidates with the same tree is used,
-and it is copied only if it is a success and the PR head does not have that
-context yet.
+Only build and test results are carried over, since they depend on the tree
+alone; jenkins/clang-tidy analyzes the PR diff and is left out. Only
+statuses posted by github-actions[bot] count. For each context, the newest
+of these statuses among all candidates with the same tree is used, and it is
+copied only if it is a success and the PR head does not have that context
+yet. PRs from forks are skipped (their token cannot post statuses).
 
 Environment: GITHUB_REPOSITORY, GH_TOKEN, PR_NUMBER.
 """
@@ -28,6 +30,8 @@ import urllib.request
 
 API_URL = os.environ.get("GITHUB_API_URL", "https://api.github.com")
 CONTEXT_PREFIX = "jenkins/"
+# Results that depend on the PR diff, not only on the tree.
+EXCLUDED_CONTEXTS = {"jenkins/clang-tidy"}
 TRUSTED_CREATOR = "github-actions[bot]"
 MAX_DESCRIPTION = 140
 MAX_CANDIDATES = 30
@@ -62,8 +66,8 @@ def tree_of(repo, sha):
   return request("GET", f"/repos/{repo}/git/commits/{sha}")["tree"]["sha"]
 
 
-def latest_statuses(repo, sha):
-  """Return the newest status per context.
+def latest_statuses(repo, sha, creator=None):
+  """Return the newest status per context, only from creator if given.
 
   The API lists every status update, newest first, so all pages are read.
   """
@@ -73,6 +77,8 @@ def latest_statuses(repo, sha):
     batch = request("GET", f"/repos/{repo}/commits/{sha}/statuses"
                            f"?per_page=100&page={page}")
     for status in batch:
+      if creator and (status.get("creator") or {}).get("login") != creator:
+        continue
       statuses.setdefault(status["context"], status)
     if len(batch) < 100:
       return statuses
@@ -106,6 +112,9 @@ def previous_heads(repo, number):
 
 def carry_over(repo, number):
   pull = request("GET", f"/repos/{repo}/pulls/{number}")
+  if (pull["head"].get("repo") or {}).get("full_name") != repo:
+    print(f"PR #{number} comes from a fork; skipped.")
+    return
   head_sha = pull["head"]["sha"]
   head_tree = tree_of(repo, head_sha)
   present = latest_statuses(repo, head_sha)
@@ -126,9 +135,11 @@ def carry_over(repo, number):
       continue
     print(f"{sha[:7]} ({label}) has the same tree")
 
-    for context, status in latest_statuses(repo, sha).items():
+    # Filter by creator before taking the newest status per context, so that
+    # a later status posted by someone else cannot hide our failure.
+    for context, status in latest_statuses(repo, sha, TRUSTED_CREATOR).items():
       if (context.startswith(CONTEXT_PREFIX)
-          and (status.get("creator") or {}).get("login") == TRUSTED_CREATOR
+          and context not in EXCLUDED_CONTEXTS
           and (context not in newest
                or status["created_at"] > newest[context][0]["created_at"])):
         newest[context] = (status, sha, label)
