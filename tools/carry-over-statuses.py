@@ -11,8 +11,10 @@ GitHub cannot search commits by tree, so the candidates are:
   1. the last head of each PR merged into this PR's head branch,
   2. previous heads of this PR (force pushes).
 
-Only statuses posted by github-actions[bot] are copied, and only for
-contexts that the PR head does not have yet.
+Only statuses posted by github-actions[bot] count. For each context, the
+newest of these statuses among all candidates with the same tree is used,
+and it is copied only if it is a success and the PR head does not have that
+context yet.
 
 Environment: GITHUB_REPOSITORY, GH_TOKEN, PR_NUMBER.
 """
@@ -61,12 +63,20 @@ def tree_of(repo, sha):
 
 
 def latest_statuses(repo, sha):
-  """Return the latest status per context (the API lists newest first)."""
+  """Return the newest status per context.
+
+  The API lists every status update, newest first, so all pages are read.
+  """
   statuses = {}
-  for status in request("GET",
-                        f"/repos/{repo}/commits/{sha}/statuses?per_page=100"):
-    statuses.setdefault(status["context"], status)
-  return statuses
+  page = 1
+  while True:
+    batch = request("GET", f"/repos/{repo}/commits/{sha}/statuses"
+                           f"?per_page=100&page={page}")
+    for status in batch:
+      statuses.setdefault(status["context"], status)
+    if len(batch) < 100:
+      return statuses
+    page += 1
 
 
 def merged_pr_heads(repo, branch):
@@ -101,6 +111,9 @@ def carry_over(repo, number):
   present = latest_statuses(repo, head_sha)
   print(f"PR #{number}: head {head_sha[:7]}, tree {head_tree[:7]}")
 
+  # For each context, the newest trusted status among all candidates with
+  # the same tree: {context: (status, sha, label)}.
+  newest = {}
   seen = {head_sha}
   candidates = [*merged_pr_heads(repo, pull["head"]["ref"]),
                 *previous_heads(repo, number)]
@@ -111,36 +124,39 @@ def carry_over(repo, number):
 
     if tree_of(repo, sha) != head_tree:
       continue
-
-    trusted = {
-        context: status
-        for context, status in latest_statuses(repo, sha).items()
-        if context.startswith(CONTEXT_PREFIX)
-        and status["state"] == "success"
-        and status["creator"]["login"] == TRUSTED_CREATOR
-    }
-    if not trusted:
-      print(f"{sha[:7]} ({label}) has the same tree but no verified statuses")
-      continue
-
     print(f"{sha[:7]} ({label}) has the same tree")
-    for context, status in sorted(trusted.items()):
-      if context in present:
-        print(f"  {context}: kept the existing {present[context]['state']} "
-              "status")
-        continue
-      suffix = f" (verified on {sha[:7]}, {label})"
-      description = status["description"][:MAX_DESCRIPTION - len(suffix)]
-      request("POST", f"/repos/{repo}/statuses/{head_sha}", {
-          "state": "success",
-          "context": context,
-          "description": description + suffix,
-          "target_url": status["target_url"],
-      })
-      print(f"  {context}: {description}{suffix}")
+
+    for context, status in latest_statuses(repo, sha).items():
+      if (context.startswith(CONTEXT_PREFIX)
+          and (status.get("creator") or {}).get("login") == TRUSTED_CREATOR
+          and (context not in newest
+               or status["created_at"] > newest[context][0]["created_at"])):
+        newest[context] = (status, sha, label)
+
+  if not newest:
+    print("No verified commit with the same tree; nothing to carry over.")
     return
 
-  print("No verified commit with the same tree; nothing to carry over.")
+  for context, (status, sha, label) in sorted(newest.items()):
+    if context in present:
+      print(f"  {context}: kept the existing {present[context]['state']} "
+            "status")
+      continue
+    if status["state"] != "success":
+      print(f"  {context}: newest result is {status['state']} on {sha[:7]}; "
+            "not carried over")
+      continue
+    suffix = f"(verified on {sha[:7]}, {label})"
+    description = (status.get("description") or "").strip()
+    description = description[:MAX_DESCRIPTION - len(suffix) - 1]
+    description = f"{description} {suffix}".strip()
+    request("POST", f"/repos/{repo}/statuses/{head_sha}", {
+        "state": "success",
+        "context": context,
+        "description": description,
+        "target_url": status["target_url"],
+    })
+    print(f"  {context}: {description}")
 
 
 def main():
