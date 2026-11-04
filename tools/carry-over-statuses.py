@@ -117,7 +117,6 @@ def carry_over(repo, number):
     return
   head_sha = pull["head"]["sha"]
   head_tree = tree_of(repo, head_sha)
-  present = latest_statuses(repo, head_sha)
   print(f"PR #{number}: head {head_sha[:7]}, tree {head_tree[:7]}")
 
   # For each context, the newest trusted status among all candidates with
@@ -141,12 +140,19 @@ def carry_over(repo, number):
       if (context.startswith(CONTEXT_PREFIX)
           and context not in EXCLUDED_CONTEXTS
           and (context not in newest
-               or status["created_at"] > newest[context][0]["created_at"])):
+               or status["created_at"] > newest[context][0]["created_at"]
+               # On a tie, keep a non-success to stay on the safe side.
+               or (status["created_at"] == newest[context][0]["created_at"]
+                   and status["state"] != "success"))):
         newest[context] = (status, sha, label)
 
   if not newest:
     print("No verified commit with the same tree; nothing to carry over.")
     return
+
+  # Read the head's statuses after the scan, right before posting, so that a
+  # status posted meanwhile by a running workflow is not overwritten.
+  present = latest_statuses(repo, head_sha)
 
   for context, (status, sha, label) in sorted(newest.items()):
     if context in present:
