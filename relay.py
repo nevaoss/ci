@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-import sys
 import os
+import signal
+import sys
 import time
 
 try:
@@ -19,10 +20,38 @@ from requests.exceptions import RequestException
 JENKINS_URL = os.environ.get("JENKINS_URL")
 CI_TOKEN = os.environ.get("CI_TOKEN")
 
+current_queue = None
+cancelling = False
+
+
 # Only the actual result should be passed to stdout for further analysis.
-# All logs should be written to the stderr
+# All logs should be written to stderr.
 def log_print(message):
   print(message, file=sys.stderr, flush=True)
+
+def cancel_jenkins_job(signum, frame):
+  global cancelling
+
+  if cancelling:
+    log_print("Job has already been canceled")
+    return
+
+  cancelling = True
+  signal_name = signal.Signals(signum).name
+  log_print(f"Received {signal_name}")
+
+  if current_queue is not None:
+    try:
+      current_queue.cancel()
+    except Exception as e:
+      log_print(f"Jenkins cancellation failed: {e}")
+
+  sys.exit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, cancel_jenkins_job)
+signal.signal(signal.SIGINT, cancel_jenkins_job)
+
 
 def fatal(e):
   log_print(f"FATAL: {e}")
@@ -48,14 +77,19 @@ class Job:
       fatal(e)
 
     q = job.invoke(
-      build_params = {
+      build_params={
         var: os.environ[var]
         for var in os.environ
         if var.startswith("GITHUB_")
     })
 
     q.block_until_building()
-    return Job.Queue(q)
+
+    queue = Job.Queue(q)
+    global current_queue
+    current_queue = queue
+
+    return queue
 
   class Queue:
     def __init__(self, q):
@@ -97,21 +131,26 @@ class Job:
           time.sleep(10)
 
     def join(self):
+      global current_queue
       log_print("Waiting for Jenkins build completion")
 
       build = self.build
-      build.block_until_complete()
 
-      log_print(f"Build completed: {build.name}")
+      try:
+        build.block_until_complete()
 
-      def get_status():
-        build.poll()
-        return build.get_status()
+        log_print(f"Build completed: {build.name}")
 
-      return self.retry(
-        "Reading Jenkins status",
-        get_status
-      )
+        def get_status():
+          build.poll()
+          return build.get_status()
+
+        return self.retry(
+          "Reading Jenkins status",
+          get_status
+        )
+      finally:
+        current_queue = None
 
     def get_artifact(self, name):
       artifacts = self.build.get_artifacts()
